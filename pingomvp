@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>Tourist Route MVP</title>
+    <script src="https://maps.googleapis.com/maps/api/js?key=YOUR_API_KEY&libraries=places"></script>
+    <style>
+      body { margin: 0; font-family: Arial, sans-serif; }
+      #header { display: flex; align-items: center; padding: 10px; background: #f9f9f9; }
+      #logo { height: 40px; margin-right: 15px; }
+      #controls { margin-top: 5px; }
+      #map { height: calc(100vh - 80px); width: 100%; }
+      #controls select { padding: 6px 10px; margin-right: 10px; }
+      #button {
+        padding: 6px 16px;
+        background: #0066ff;
+        color: white;
+        border: none;
+        border-radius: 8px;
+        cursor: pointer;
+        font-weight: bold;
+      }
+      #button:hover {
+        background: #0052cc;
+      }
+    </style>
+  </head>
+  <body>
+    <!-- Header with logo -->
+    <div id="header">
+      <img id="logo" src="Logo.png" alt="Logo">
+      <div id="controls">
+        <select id="placeType">
+          <option value="brewpub">Brewpub</option>
+          <option value="restaurant">Local cuisine restaurant</option>
+          <option value="museum">Historical places</option>
+          <option value="tourist_attraction">Mix</option>
+        </select>
+        <button id="button">Show</button>
+      </div>
+    </div>
+
+    <div id="map"></div>
+
+    <script>
+      let map, service, directionsService, directionsRenderer, userLocation;
+      let markers = [];
+      let infoWindow;
+
+      function initMap() {
+        map = new google.maps.Map(document.getElementById("map"), { zoom: 15 });
+        directionsService = new google.maps.DirectionsService();
+        directionsRenderer = new google.maps.DirectionsRenderer({
+          map: map,
+          suppressMarkers: true // prevents Google’s default letter markers
+        });
+
+        if (navigator.geolocation) {
+          navigator.geolocation.getCurrentPosition((pos) => {
+            userLocation = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+            map.setCenter(userLocation);
+            let userMarker = new google.maps.Marker({
+              position: userLocation,
+              map: map,
+              label: "You"
+            });
+            markers.push(userMarker);
+          }, () => {
+            alert("Could not get your location. Please enable location access.");
+          });
+        } else {
+          alert("Geolocation not supported by this browser.");
+        }
+      }
+
+      function clearMap() {
+        markers.forEach(m => m.setMap(null));
+        markers = [];
+        directionsRenderer.setDirections({ routes: [] });
+        if (infoWindow) infoWindow.close();
+      }
+
+      // General filter (restaurants, museums, attractions)
+      function filterResults(results, chosenType) {
+        return results.filter(r => {
+          let name = r.name.toLowerCase();
+          let types = r.types || [];
+          if ((chosenType === "brewpub" || chosenType === "restaurant") &&
+              (name.includes("hotel") || types.includes("lodging"))) {
+            return false;
+          }
+          return true;
+        });
+      }
+
+      // Special filter for Brewpubs
+      function filterBrewpubs(results) {
+        const keywords = ["beer", "brew", "pub", "craft"];
+        let filtered = results.filter(r => {
+          if (!r.rating || r.rating < 4.2) return false;
+          if (!r.opening_hours || !r.opening_hours.open_now) return false;
+
+          let name = r.name.toLowerCase();
+          let types = r.types || [];
+          let isDrinkSpot = types.includes("bar") || types.includes("restaurant") ||
+                            types.includes("cafe") || types.includes("brewpub");
+
+          let hasBeerHint = keywords.some(k => name.includes(k));
+
+          return isDrinkSpot && hasBeerHint;
+        });
+
+        // Sort craft/breweries first, then by rating
+        filtered.sort((a, b) => {
+          let aCraft = a.name.toLowerCase().includes("craft") || a.types.includes("brewpub");
+          let bCraft = b.name.toLowerCase().includes("craft") || b.types.includes("brewpub");
+          if (aCraft && !bCraft) return -1;
+          if (!aCraft && bCraft) return 1;
+          return (b.rating || 0) - (a.rating || 0);
+        });
+
+        return filtered.slice(0, 5); // fewer than 5 is allowed
+      }
+
+      function createRoute() {
+        if (!userLocation) {
+          alert("User location not found yet.");
+          return;
+        }
+
+        clearMap();
+
+        let chosenType = document.getElementById("placeType").value;
+        service = new google.maps.places.PlacesService(map);
+
+        service.nearbySearch({
+          location: userLocation,
+          radius: 1000,
+          type: chosenType,
+          openNow: true
+        }, (results, status) => {
+          if (status !== "OK" || !results.length) {
+            alert("No places found nearby.");
+            return;
+          }
+
+          let filtered;
+          if (chosenType === "brewpub") {
+            filtered = filterBrewpubs(results);
+          } else {
+            filtered = filterResults(results, chosenType).slice(0, 5);
+          }
+
+          if (!filtered.length) {
+            alert("No valid places found after filtering.");
+            return;
+          }
+
+          // Add markers + tooltips
+          filtered.forEach((place, i) => {
+            let marker = new google.maps.Marker({
+              position: place.geometry.location,
+              map: map,
+              label: String(i + 1)
+            });
+            markers.push(marker);
+
+            google.maps.event.addListener(marker, "click", () => {
+              service.getDetails({ placeId: place.place_id }, (details, s) => {
+                if (s === "OK") {
+                  if (infoWindow) infoWindow.close();
+                  let desc = "No description available.";
+                  if (details.editorial_summary) {
+                    desc = details.editorial_summary.overview;
+                  } else if (details.reviews && details.reviews.length > 0) {
+                    desc = details.reviews[0].text;
+                  } else {
+                    desc = "Famous local spot known for its atmosphere and history.";
+                  }
+                  infoWindow = new google.maps.InfoWindow({
+                    content: `
+                      <div style="max-width:250px;">
+                        <h3>${details.name}</h3>
+                        <p>${details.formatted_address || "No address"}</p>
+                        <p><b>Type:</b> ${chosenType}</p>
+                        <p>${desc}</p>
+                      </div>
+                    `
+                  });
+                  infoWindow.open(map, marker);
+                  map.addListener("click", () => { if (infoWindow) infoWindow.close(); });
+                }
+              });
+            });
+          });
+
+          // Build route
+          let locs = filtered.map(r => r.geometry.location);
+          if (locs.length > 1) {
+            let waypoints = locs.slice(1, -1).map(loc => ({ location: loc, stopover: true }));
+            directionsService.route({
+              origin: locs[0],
+              destination: locs[locs.length - 1],
+              waypoints: waypoints,
+              travelMode: google.maps.TravelMode.WALKING
+            }, (res, status) => {
+              if (status === "OK") {
+                directionsRenderer.setDirections(res);
+              } else {
+                alert("Could not create route: " + status);
+              }
+            });
+          }
+        });
+      }
+
+      document.getElementById("button").onclick = createRoute;
+      window.onload = initMap;
+    </script>
+  </body>
+</html>
